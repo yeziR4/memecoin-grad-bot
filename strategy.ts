@@ -189,6 +189,8 @@ export function createStrategy(params: Params = DEFAULT_PARAMS) {
   // coins with at least one completed trip of at least 0.01 SOL (the guardrail's size).
   const tripSpent = new Map<Pubkey, bigint>();
   const tripCoins = new Set<Pubkey>();
+  let probesSent = 0;
+  let lastProbeBatch = -1000;
 
   return function onBatch(state: BotState, batch: Batch): OrderInput[] {
     const slot = batch.slot;
@@ -437,9 +439,11 @@ export function createStrategy(params: Params = DEFAULT_PARAMS) {
       else if (!c.strong) weakOpen++;
     }
 
-    // 4. Guardrail probe: buy a small piece of the deepest curve touched this slot and sell it as
-    //    soon as it lands, so the run keeps meeting the 20-coin round-trip bar.
-    if (needProbe && orders.length + 2 <= cap && open < state.hello.caps.max_open_positions && state.freeCashLamports() > p.probeLamports + 4n * tx) {
+    // 4. Guardrail probe: every few batches, buy a small piece of a DEEP curve touched in this
+    //    slot (never clipped by the 1% cap, so the trip always counts) and sell it as soon as it
+    //    lands. Capped in number, and stopped once enough distinct coins carry a trip.
+    const probeReady = needProbe && probesSent < 40 && batch.seq - lastProbeBatch >= 25;
+    if (probeReady && orders.length + 2 <= cap && open < state.hello.caps.max_open_positions && state.freeCashLamports() > p.probeLamports + 4n * tx) {
       let best: Pubkey | null = null;
       let bestSol = 0n;
       for (const mint of touched) {
@@ -451,7 +455,7 @@ export function createStrategy(params: Params = DEFAULT_PARAMS) {
         if (slot < b.coolUntil) continue;
         const last = b.ticks[b.ticks.length - 1];
         if (last === undefined) continue;
-        if (last.realSol > bestSol) {
+        if (last.realSol >= 20_000_000_000n && last.realSol > bestSol) {
           bestSol = last.realSol;
           best = mint;
         }
@@ -460,7 +464,7 @@ export function createStrategy(params: Params = DEFAULT_PARAMS) {
         const amount = p.probeLamports;
         const sizeCap = buyCap(state, best);
         const use = amount < sizeCap ? amount : sizeCap;
-        if (use >= 2_000_000n) {
+        if (use >= 10_000_000n) {
           orders.push({ side: 'buy', mint: best, quote_lamports: use, max_slippage_bps: p.buySlippageBps });
           const b = book(best);
           const ticks = b.ticks;
@@ -473,6 +477,8 @@ export function createStrategy(params: Params = DEFAULT_PARAMS) {
           b.kind = 'reversion';
           b.probe = true;
           pendingMints.add(best);
+          probesSent += 1;
+          lastProbeBatch = batch.seq;
         }
       }
     }
