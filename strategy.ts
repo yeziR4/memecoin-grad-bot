@@ -163,6 +163,8 @@ interface Book {
   probe: boolean;
   /** Graduation adds used so far on this position. */
   adds: number;
+  /** The last batch an add was sent on (adds are spaced out, never stacked in one slot). */
+  lastAddBatch: number;
 }
 
 const BIGINT_KEYS = ['minRealSol', 'minHighRealSol', 'minNetFlow', 'tranche', 'maxPosition', 'minBuy', 'strongRealSol', 'weakTranche', 'weakMaxPosition', 'gradMinSol', 'gradStake', 'probeLamports'] as const;
@@ -179,7 +181,7 @@ export function createStrategy(params: Params = DEFAULT_PARAMS) {
   const book = (mint: Pubkey): Book => {
     let b = books.get(mint);
     if (b === undefined) {
-      b = { ticks: [], createdSlot: -1, entryPrice: 0, entrySlot: -1, entryHigh: 0, committed: 0n, coolUntil: -1, exiting: false, strong: false, kind: 'reversion', probe: false, adds: 0 };
+      b = { ticks: [], createdSlot: -1, entryPrice: 0, entrySlot: -1, entryHigh: 0, committed: 0n, coolUntil: -1, exiting: false, strong: false, kind: 'reversion', probe: false, adds: 0, lastAddBatch: -1000 };
       books.set(mint, b);
     }
     return b;
@@ -273,8 +275,9 @@ export function createStrategy(params: Params = DEFAULT_PARAMS) {
         b.exiting = true;
         continue;
       }
-      // Pyramid a running graduation position while buyers still flow and the price holds up.
-      if (isGrad && p.gradAdds > 0 && b.adds < p.gradAdds) {
+      // Pyramid a running graduation position while buyers still flow and the price holds up,
+      // spacing the adds out so our own impact is never stacked inside a few seconds.
+      if (isGrad && p.gradAdds > 0 && b.adds < p.gradAdds && batch.seq - b.lastAddBatch >= 25) {
         if (pendingMints.has(mint)) continue;
         const lastT = ticks[ticks.length - 1];
         if (lastT === undefined || !lastT.isBuy) continue;
@@ -290,6 +293,7 @@ export function createStrategy(params: Params = DEFAULT_PARAMS) {
         orders.push({ side: 'buy', mint, quote_lamports: amount, max_slippage_bps: p.buySlippageBps });
         b.committed += amount;
         b.adds += 1;
+        b.lastAddBatch = batch.seq;
         pendingMints.add(mint);
         continue;
       }
