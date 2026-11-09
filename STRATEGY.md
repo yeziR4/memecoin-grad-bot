@@ -16,9 +16,12 @@ position, and exits the whole position on a 20% take-profit, a 10% stop, or afte
 **Graduation sleeve.** A curve whose real SOL reserve is closing on the completion
 threshold keeps drawing momentum buyers. When a curve holds at least 55 SOL of real
 reserves, is at least 300 slots old, and five of its last eight trades are buys ending in a
-buy, the bot buys 0.25 SOL and holds for the run into graduation (the replay closes the
-position at completion), exiting earlier on a 15% take-profit, a 12% stop, or 2400 slots of
-staleness. At most two such positions at once.
+buy, the bot buys 0.55 SOL and holds for the run, pyramiding up to three more 0.55 SOL adds
+while the newest trade is still a buy, net flow over the window stays positive and the price
+holds above the first entry. It exits on a 15% take-profit, a 15% stop, or 2400 slots of
+staleness; the replay also closes the position at completion. At most two such positions at
+once. Riding the run to completion without a take-profit was tested and loses: most runs
+fade before the curve completes.
 
 **Guardrail pacing.** The run must round-trip at least 0.01 SOL on 20 coins. The bot counts
 its completed qualifying trips and, while it is behind a target of 24, buys 0.02 SOL of the

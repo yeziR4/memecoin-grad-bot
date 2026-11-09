@@ -61,6 +61,10 @@ export interface Params {
   gradStopLoss: number;
   /** The curve must be at least this many slots old (skip brand-new pumps). */
   gradMinAgeSlots: number;
+  /** Adds to a running graduation position, each of gradStake, while it still qualifies. */
+  gradAdds: number;
+  /** The largest single sell in the confirmation window, as bps of real SOL then, at most. */
+  gradMaxSellBps: number;
   // --- pacing probe ---
   paceEnabled: boolean;
   paceCoins: number;
@@ -108,6 +112,8 @@ export const DEFAULT_PARAMS: Params = {
   gradTakeProfit: 0.15,
   gradStopLoss: 0.15,
   gradMinAgeSlots: 300,
+  gradAdds: 3,
+  gradMaxSellBps: 100_000,
 
   paceEnabled: true,
   paceCoins: 24,
@@ -155,6 +161,8 @@ interface Book {
   strong: boolean;
   kind: Kind;
   probe: boolean;
+  /** Graduation adds used so far on this position. */
+  adds: number;
 }
 
 const BIGINT_KEYS = ['minRealSol', 'minHighRealSol', 'minNetFlow', 'tranche', 'maxPosition', 'minBuy', 'strongRealSol', 'weakTranche', 'weakMaxPosition', 'gradMinSol', 'gradStake', 'probeLamports'] as const;
@@ -171,7 +179,7 @@ export function createStrategy(params: Params = DEFAULT_PARAMS) {
   const book = (mint: Pubkey): Book => {
     let b = books.get(mint);
     if (b === undefined) {
-      b = { ticks: [], createdSlot: -1, entryPrice: 0, entrySlot: -1, entryHigh: 0, committed: 0n, coolUntil: -1, exiting: false, strong: false, kind: 'reversion', probe: false };
+      b = { ticks: [], createdSlot: -1, entryPrice: 0, entrySlot: -1, entryHigh: 0, committed: 0n, coolUntil: -1, exiting: false, strong: false, kind: 'reversion', probe: false, adds: 0 };
       books.set(mint, b);
     }
     return b;
@@ -263,6 +271,26 @@ export function createStrategy(params: Params = DEFAULT_PARAMS) {
         b.exiting = true;
         continue;
       }
+      // Pyramid a running graduation position while buyers still flow and the price holds up.
+      if (isGrad && p.gradAdds > 0 && b.adds < p.gradAdds) {
+        if (pendingMints.has(mint)) continue;
+        const lastT = ticks[ticks.length - 1];
+        if (lastT === undefined || !lastT.isBuy) continue;
+        let net = 0n;
+        for (let i = Math.max(0, ticks.length - p.gradFlowTrades); i < ticks.length; i++) {
+          net += ticks[i]!.isBuy ? ticks[i]!.sol : -ticks[i]!.sol;
+        }
+        if (net < 0n || price < b.entryPrice) continue;
+        let amount = p.gradStake;
+        const sizeCap = buyCap(state, mint);
+        if (amount > sizeCap) amount = sizeCap;
+        if (state.freeCashLamports() - amount - tx < 0n) continue;
+        orders.push({ side: 'buy', mint, quote_lamports: amount, max_slippage_bps: p.buySlippageBps });
+        b.committed += amount;
+        b.adds += 1;
+        pendingMints.add(mint);
+        continue;
+      }
       // Add a tranche while the dip holds near the first entry (reversion positions only).
       if (isGrad || b.probe) continue;
       const maxPos = b.strong ? p.maxPosition : p.weakMaxPosition;
@@ -314,13 +342,22 @@ export function createStrategy(params: Params = DEFAULT_PARAMS) {
       const created = b.createdSlot < 0 ? slot : b.createdSlot;
       const age = slot - created;
 
-      // Graduation: big reserve, buyers still flowing, young enough to still run.
+      // Graduation: big reserve, buyers still flowing, no big single seller, young enough to run.
       if (p.gradEnabled && last.realSol >= p.gradMinSol && gradOpen < p.gradMaxOpen && age >= p.gradMinAgeSlots) {
         let buys = 0;
+        let maxSellBps = 0n;
         for (let i = Math.max(0, ticks.length - p.gradFlowTrades); i < ticks.length; i++) {
-          if (ticks[i]!.isBuy) buys++;
+          const t = ticks[i]!;
+          if (t.isBuy) buys++;
+          else {
+            const pre = t.realSol + t.sol;
+            if (pre > 0n) {
+              const bps = (t.sol * 10_000n) / pre;
+              if (bps > maxSellBps) maxSellBps = bps;
+            }
+          }
         }
-        if (buys >= p.gradMinBuys && last.isBuy) {
+        if (buys >= p.gradMinBuys && last.isBuy && maxSellBps <= BigInt(p.gradMaxSellBps)) {
           entryCandidates.push({ mint, kind: 'graduation', strong: true, dd: 0, hi: last.price });
           continue;
         }
@@ -392,6 +429,7 @@ export function createStrategy(params: Params = DEFAULT_PARAMS) {
       b.strong = c.strong;
       b.kind = c.kind;
       b.probe = false;
+      b.adds = 0;
       pendingMints.add(c.mint);
       entries++;
       open++;
